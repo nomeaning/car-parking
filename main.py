@@ -1,33 +1,86 @@
+import json
 import os
 import cv2
+import numpy as np  # <--- Додайте імпорт NumPy
 
-# Force FFmpeg to use TCP for RTSP transport (prevents UDP timeouts)
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 
-RTSP_URL = "rtsp://admin:L23524A0@192.168.88.250:554/cam/realmonitor?channel=1&subtype=1"
+class ParkingSpotPicker:
 
-def start_camera_stream():
-    print("Connecting to camera via TCP...")
-    cap = cv2.VideoCapture(RTSP_URL, cv2.CAP_FFMPEG)
+    def __init__(self, rtsp_url: str, config_path: str):
+        self.rtsp_url = rtsp_url
+        self.config_path = config_path
+        self.spots = []
+        self.current_points = []
 
-    if not cap.isOpened():
-        print("Error: Could not open connection to Imou camera.")
-        return
+        if os.path.exists(self.config_path):
+            with open(self.config_path, "r") as f:
+                self.spots = json.load(f)
 
-    print("Stream connected! Press 'q' to quit.")
-    
-    while True:
+    def mouse_callback(self, event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self.current_points.append([x, y])
+            if len(self.current_points) == 4:
+                self.spots.append(self.current_points.copy())
+                self.current_points = []
+                print(f"Додано паркомісце #{len(self.spots)}")
+
+    def run(self):
+        # Налаштування TCP для стабільного RTSP
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+
+        cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
         ret, frame = cap.read()
+        cap.release()
+
         if not ret:
-            print("Failed to receive frame. Retrying...")
-            break
+            print("Не вдалося отримати кадр для розмітки.")
+            return
 
-        cv2.imshow("Imou Camera Stream", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+        cv2.namedWindow("Select Parking Spots")
+        cv2.setMouseCallback("Select Parking Spots", self.mouse_callback)
 
-    cap.release()
-    cv2.destroyAllWindows()
+        while True:
+            temp_frame = frame.copy()
+
+            # Малювання збережених місць
+            for spot in self.spots:
+                # ВАЖЛИВО: Перетворення списку в np.int32 масив запобігає падінню OpenCV
+                pts = np.array(spot, dtype=np.int32).reshape((-1, 1, 2))
+                cv2.polylines(
+                    temp_frame, [pts], isClosed=True, color=(0, 255, 0), thickness=2
+                )
+
+            # Малювання поточних кліків (червоні точки)
+            for pt in self.current_points:
+                cv2.circle(
+                    temp_frame,
+                    tuple(pt),
+                    radius=5,
+                    color=(0, 0, 255),
+                    thickness=-1,
+                )
+
+            cv2.imshow("Select Parking Spots", temp_frame)
+            key = cv2.waitKey(1) & 0xFF
+
+            if key == ord("s"):
+                os.makedirs(
+                    os.path.dirname(self.config_path), exist_ok=True
+                )
+                with open(self.config_path, "w") as f:
+                    json.dump(self.spots, f, indent=4)
+                print(f"Збережено {len(self.spots)} місць у {self.config_path}")
+            elif key == ord("c"):
+                self.spots = []
+                self.current_points = []
+                print("Очищено всі місця.")
+            elif key == ord("q"):
+                break
+
+        cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
-    start_camera_stream()
+    RTSP_URL = "rtsp://admin:L23524A0@192.168.88.250:554/cam/realmonitor?channel=1&subtype=0"
+    picker = ParkingSpotPicker(RTSP_URL, "config/parking_spots.json")
+    picker.run()
