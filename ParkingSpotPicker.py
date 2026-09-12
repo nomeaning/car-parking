@@ -24,12 +24,12 @@ class ParkingSpotPicker:
                 print(f"Додано паркомісце #{len(self.spots)}")
 
     def run(self):
-        fromCamera = False  # Змінна для вибору джерела кадру
-
-        # Налаштування TCP для стабільного RTSP
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+        fromCamera = True  # Змінна для вибору джерела кадру
 
         if fromCamera:
+            # Налаштування TCP для стабільного RTSP
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+
             cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
             ret, frame = cap.read()
             cap.release()
