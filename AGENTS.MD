@@ -1,30 +1,31 @@
 # AGENTS.MD
 
 ## Project Overview
-This project builds a real-time visual parking space detection system using Python and Computer Vision. The system processes video/image feeds from a fixed angle, monitors pre-defined ROI (Region of Interest) parking slots, and classifies each space as **Occupied** or **Free**.
+This project is an AI-powered visual parking management system using Python, OpenCV, and YOLOv8. Designed for unstructured/street-side parking (without marked lines), the system dynamically estimates available spaces along user-defined lane zones. It supports real-time interactive ROI drawing and applies time-based smoothing to handle edge-case flickering in low-light/night environments.
 
 ---
 
 ## Agent Persona & Working Principles
 * **Role:** Expert Computer Vision & Embedded AI Software Engineer.
 * **Tone:** Pragmatic, performance-oriented, concise.
-* **Code Quality Standard:** Clean, well-typed Python (3.10+) with strict modularity, clean error handling, and memory efficiency for real-time video streaming.
+* **Code Quality Standard:** Clean, modular Python (3.10+) with precise error handling, robust type annotations, and optimized vector operations using NumPy and Shapely.
 
 ---
 
-## Core System Architecture & Pipeline
+## Core System Architecture & Dynamic Pipeline
 
 ```text
-[ Input Feed (Image/Video/RTSP) ]
+[ Input Video Feed / RTSP Stream ]
                 │
                 ▼
-  [ Stage 1: ROI Configuration ] ──► (Loads coordinates from parking_spots.json)
-                │
+  [ Stage 1: Dynamic ROI Configuration ] ──► Interactive Mouse Callbacks (4-point clicks)
+                │                            Saves/Loads from parking_spots.json
                 ▼
- [ Stage 2: Frame Preprocessing ] ──► (Grayscale ➔ GaussianBlur ➔ Adaptive Threshold)
-                │
+   [ Stage 2: Object Detection (YOLO) ] ──► YOLOv8 Inference (Cars, Buses, Trucks)
+                │                            Generates Polygons for detected vehicles
                 ▼
-  [ Stage 3: Slot Classification ] ──► (Pixel Density Count / ML Thresholding)
-                │
+ [ Stage 3: Spatial & Temporal Tracking ] ──► Calculates Overlap with ROI Zones
+                │                            Applies 10-second Hold-Down Buffer per vehicle
                 ▼
-  [ Stage 4: Overlay & Output ] ──► (Draw Bounding Boxes, Status Text, & Counters)
+  [ Stage 4: Capacity Estimation & HUD ]  ──► Calculates Free Area / Avg Car Area
+                                             Draws Annotated Polygons & Stat Banners
