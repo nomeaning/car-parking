@@ -1,17 +1,18 @@
 import time
+import cv2
 import numpy as np
 from shapely.geometry import Polygon
 
 
 class YoloLaneDetector:
-    """Pure analytical engine with internal FPS throttling for Raspberry Pi efficiency."""
+    """Analytical engine for YOLO inference, temporal filtering, and perspective correction."""
 
     def __init__(
         self,
         model_path: str = "yolov8n.pt",
         avg_car_area_ratio: float = 0.20,
         hold_time_seconds: float = 10.0,
-        fps_limit: float = 1.0,  # За замовчуванням 1 аналіз на секунду
+        fps_limit: float = 1.0,
     ):
         from ultralytics import YOLO
 
@@ -23,20 +24,72 @@ class YoloLaneDetector:
         self.model = YOLO(model_path)
         self.active_cars_history = {}
 
-        # КЕШ результатів для кадрів між детекціями
+        # Cache variables
         self.last_analysis_time = 0.0
         self.cached_stats = []
         self.cached_total_free = 0
         self.cached_total_capacity = 0
 
+    def _get_birds_eye_polygon(
+        self, spot_pts: list[list[int]], target_width=800, target_height=200
+    ):
+        """Calculates homography matrix for Bird's-Eye View perspective transformation."""
+        src_pts = np.array(spot_pts, dtype=np.float32)
+        dst_pts = np.array(
+            [
+                [0, 0],
+                [target_width, 0],
+                [target_width, target_height],
+                [0, target_height],
+            ],
+            dtype=np.float32,
+        )
+        matrix = cv2.getPerspectiveTransform(src_pts, dst_pts)
+        return matrix, target_width, target_height
+
+    def _transform_bbox_to_topdown(
+            self, bbox: tuple[int, int, int, int], matrix: np.ndarray, target_w: int = 800, target_h: int = 200
+        ) -> Polygon:
+            """Переносить 2D Bounding Box автомобіля у вирівняну систему координат з реальними пропорціями."""
+            x1, y1, x2, y2 = bbox
+            
+            # Точка контакту коліс із землею (нижній центр рамки)
+            bottom_center = np.array([[(x1 + x2) / 2.0, float(y2)]], dtype=np.float32)
+            bottom_center_reshaped = np.array([bottom_center])
+
+            # Трансформуємо точку через матрицю
+            transformed_pt = cv2.perspectiveTransform(
+                bottom_center_reshaped, matrix
+            ).squeeze()
+
+            tx, ty = transformed_pt[0], transformed_pt[1]
+            
+            # Реальні габарити авто на смузі 800x200:
+            # Середнє авто займає приблизно ~220px у довжину (при ємності 3-4 авто на смугу)
+            # та перекриває майже всю ширину смуги (target_h = 200px)
+            car_length = target_w * 0.28  # ~224px довжини
+            car_width = target_h * 0.80   # ~160px ширини
+
+            half_l = car_length / 2.0
+            half_w = car_width / 2.0
+
+            return Polygon(
+                [
+                    (tx - half_l, ty - half_w),
+                    (tx + half_l, ty - half_w),
+                    (tx + half_l, ty + half_w),
+                    (tx - half_l, ty + half_w),
+                ]
+            )
+
     def analyze_frame(self, frame: np.ndarray, spots: list[list[list[int]]]):
+        """Main inference and analytics processing pipeline."""
         if not spots:
             return [], 0, 0
 
         current_time = time.time()
 
-        # Якщо з моменту останнього запуску YOLO минуло менше 1 сек (1/FPS) —
-        # повертаємо збережені результати без навантаження CPU
+        # FPS Throttling check
         if (current_time - self.last_analysis_time) < self.analysis_interval:
             return (
                 self.cached_stats,
@@ -44,27 +97,26 @@ class YoloLaneDetector:
                 self.cached_total_capacity,
             )
 
-        # Оновлюємо таймер запуску YOLO
         self.last_analysis_time = current_time
 
-        # 1. Інференс YOLO (виконується 1 раз на секунду)
+        # Run inference
         results_iter = self.model(frame, classes=[2, 5, 7], verbose=False)
         result = next(iter(results_iter))
 
         detected_cars = []
-        for box in result.boxes.xyxy.cpu().numpy():
+        for box in result.boxes.xyxy.numpy():
             x1, y1, x2, y2 = map(int, box[:4])
-            car_poly = Polygon([(x1, y1), (x2, y1), (x2, y2), (x1, y2)])
-            detected_cars.append((car_poly, (x1, y1, x2, y2)))
+            car_poly_2d = Polygon([(x1, y1), (x2, y1), (x2, y2), (x1, y2)])
+            detected_cars.append((car_poly_2d, (x1, y1, x2, y2)))
 
         sector_stats = []
         total_free_cars = 0
         total_capacity = 0
 
-        # 2. Розрахунок геометрії та часу
         for idx, spot in enumerate(spots):
-            lane_polygon = Polygon(spot)
-            total_lane_area = lane_polygon.area
+            matrix, target_w, target_h = self._get_birds_eye_polygon(spot)
+            topdown_lane_polygon = Polygon([(0, 0), (target_w, 0), (target_w, target_h), (0, target_h)])
+            total_lane_area = topdown_lane_polygon.area
 
             if idx not in self.active_cars_history:
                 self.active_cars_history[idx] = []
@@ -72,25 +124,26 @@ class YoloLaneDetector:
             new_history = []
             active_boxes = []
 
-            for car_poly, bbox in detected_cars:
-                if lane_polygon.intersects(car_poly):
-                    new_history.append((car_poly, current_time))
+            for car_poly_2d, bbox in detected_cars:
+                if Polygon(spot).intersects(car_poly_2d):
+                    topdown_car_poly = self._transform_bbox_to_topdown(bbox, matrix, target_w, target_h)
+                    new_history.append((topdown_car_poly, current_time))
                     active_boxes.append(bbox)
 
-            for old_car_poly, last_seen in self.active_cars_history[idx]:
+            for old_topdown_poly, last_seen in self.active_cars_history[idx]:
                 if current_time - last_seen < self.hold_time_seconds:
                     already_added = any(
-                        old_car_poly.intersects(new_car) for new_car, _ in new_history
+                        old_topdown_poly.intersects(new_car) for new_car, _ in new_history
                     )
                     if not already_added:
-                        new_history.append((old_car_poly, last_seen))
+                        new_history.append((old_topdown_poly, last_seen))
 
             self.active_cars_history[idx] = new_history
 
             occupied_area = 0.0
-            for car_poly, _ in self.active_cars_history[idx]:
-                if lane_polygon.intersects(car_poly):
-                    intersection = lane_polygon.intersection(car_poly)
+            for topdown_car_poly, _ in self.active_cars_history[idx]:
+                if topdown_lane_polygon.intersects(topdown_car_poly):
+                    intersection = topdown_lane_polygon.intersection(topdown_car_poly)
                     occupied_area += intersection.area
 
             occupied_area = min(occupied_area, total_lane_area)
@@ -111,7 +164,6 @@ class YoloLaneDetector:
                 }
             )
 
-        # Зберігаємо нові дані в КЕШ
         self.cached_stats = sector_stats
         self.cached_total_free = total_free_cars
         self.cached_total_capacity = total_capacity
