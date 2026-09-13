@@ -86,7 +86,7 @@ class YoloLaneDetector:
         result = next(iter(results_iter))
 
         detected_cars = []
-        for box in result.boxes.xyxy.numpy():
+        for box in result.boxes.xyxy.numpy(): # type: ignore
             x1, y1, x2, y2 = map(int, box[:4])
             car_poly_2d = Polygon([(x1, y1), (x2, y1), (x2, y2), (x1, y2)])
             detected_cars.append((car_poly_2d, (x1, y1, x2, y2)))

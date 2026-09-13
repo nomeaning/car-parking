@@ -3,3 +3,5 @@ build
 dist
 yolov8m.pt
 yolov8x.pt
+detectors/__pycache__
+config/parking_spots.json

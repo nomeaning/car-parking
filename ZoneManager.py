@@ -27,17 +27,15 @@ class ZoneManager:
             json.dump(self.spots, f, indent=4)
 
     def mouse_callback(self, event, x, y, flags, param) -> None:
+        if self.spots and len(self.spots) == 1 and len(self.spots[0]) == 4:
+            return  # Ignore clicks if already have 4 points
+
         """Handles OpenCV mouse events for drawing interactive zones."""
         if event == cv2.EVENT_LBUTTONDOWN:
             self.current_points.append([x, y])
             if len(self.current_points) == 4:
                 self.spots.append(self.current_points.copy())
                 self.current_points = []
-                self.save_spots()
-
-        elif event == cv2.EVENT_RBUTTONDOWN:
-            if self.spots:
-                self.spots.pop()
                 self.save_spots()
 
     def clear_all_spots(self) -> None:
