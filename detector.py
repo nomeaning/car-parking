@@ -5,12 +5,10 @@ from shapely.geometry import Polygon
 
 
 class YoloLaneDetector:
-    """Analytical engine for YOLO inference, temporal filtering, and perspective correction."""
-
     def __init__(
         self,
-        model_path: str = "yolov8n.pt",
-        avg_car_area_ratio: float = 0.20,
+        model_path: str = "yolov8s.pt",
+        avg_car_area_ratio: float = 0.25,
         hold_time_seconds: float = 10.0,
         fps_limit: float = 1.0,
     ):
@@ -24,24 +22,15 @@ class YoloLaneDetector:
         self.model = YOLO(model_path)
         self.active_cars_history = {}
 
-        # Cache variables
         self.last_analysis_time = 0.0
         self.cached_stats = []
         self.cached_total_free = 0
         self.cached_total_capacity = 0
 
-    def _get_birds_eye_polygon(
-        self, spot_pts: list[list[int]], target_width=800, target_height=200
-    ):
-        """Calculates homography matrix for Bird's-Eye View perspective transformation."""
+    def _get_birds_eye_polygon(self, spot_pts, target_width=800, target_height=200):
         src_pts = np.array(spot_pts, dtype=np.float32)
         dst_pts = np.array(
-            [
-                [0, 0],
-                [target_width, 0],
-                [target_width, target_height],
-                [0, target_height],
-            ],
+            [[0, 0], [target_width, 0], [target_width, target_height], [0, target_height]],
             dtype=np.float32,
         )
         matrix = cv2.getPerspectiveTransform(src_pts, dst_pts)
@@ -50,25 +39,21 @@ class YoloLaneDetector:
     def _transform_bbox_to_topdown(
             self, bbox: tuple[int, int, int, int], matrix: np.ndarray, target_w: int = 800, target_h: int = 200
         ) -> Polygon:
-            """Переносить 2D Bounding Box автомобіля у вирівняну систему координат з реальними пропорціями."""
+            """Створює проекцію автомобіля у Bird's-Eye View просторі."""
             x1, y1, x2, y2 = bbox
             
-            # Точка контакту коліс із землею (нижній центр рамки)
-            bottom_center = np.array([[(x1 + x2) / 2.0, float(y2)]], dtype=np.float32)
-            bottom_center_reshaped = np.array([bottom_center])
-
-            # Трансформуємо точку через матрицю
-            transformed_pt = cv2.perspectiveTransform(
-                bottom_center_reshaped, matrix
-            ).squeeze()
-
-            tx, ty = transformed_pt[0], transformed_pt[1]
+            # Точка контакту коліс із дорогою (нижня частина рамки)
+            cx = (x1 + x2) / 2.0
+            cy = float(y2)
             
-            # Реальні габарити авто на смузі 800x200:
-            # Середнє авто займає приблизно ~220px у довжину (при ємності 3-4 авто на смугу)
-            # та перекриває майже всю ширину смуги (target_h = 200px)
-            car_length = target_w * 0.28  # ~224px довжини
-            car_width = target_h * 0.80   # ~160px ширини
+            bottom_point = np.array([[[cx, cy]]], dtype=np.float32)
+            transformed_pt = cv2.perspectiveTransform(bottom_point, matrix).squeeze()
+            tx, ty = transformed_pt[0], transformed_pt[1]
+
+            # Фізичний розмір авто в ізометричній сітці: 
+            # 1 авто з 4 займає не менше 23% довжини (184px) та майже всю ширину (180px)
+            car_length = target_w * 0.23
+            car_width = target_h * 0.90
 
             half_l = car_length / 2.0
             half_w = car_width / 2.0
@@ -83,13 +68,11 @@ class YoloLaneDetector:
             )
 
     def analyze_frame(self, frame: np.ndarray, spots: list[list[list[int]]]):
-        """Main inference and analytics processing pipeline."""
         if not spots:
             return [], 0, 0
 
         current_time = time.time()
 
-        # FPS Throttling check
         if (current_time - self.last_analysis_time) < self.analysis_interval:
             return (
                 self.cached_stats,
@@ -99,7 +82,6 @@ class YoloLaneDetector:
 
         self.last_analysis_time = current_time
 
-        # Run inference
         results_iter = self.model(frame, classes=[2, 5, 7], verbose=False)
         result = next(iter(results_iter))
 
@@ -114,7 +96,8 @@ class YoloLaneDetector:
         total_capacity = 0
 
         for idx, spot in enumerate(spots):
-            matrix, target_w, target_h = self._get_birds_eye_polygon(spot)
+            target_w, target_h = 800, 200
+            matrix, _, _ = self._get_birds_eye_polygon(spot, target_w, target_h)
             topdown_lane_polygon = Polygon([(0, 0), (target_w, 0), (target_w, target_h), (0, target_h)])
             total_lane_area = topdown_lane_polygon.area
 
@@ -132,9 +115,7 @@ class YoloLaneDetector:
 
             for old_topdown_poly, last_seen in self.active_cars_history[idx]:
                 if current_time - last_seen < self.hold_time_seconds:
-                    already_added = any(
-                        old_topdown_poly.intersects(new_car) for new_car, _ in new_history
-                    )
+                    already_added = any(old_topdown_poly.intersects(new_car) for new_car, _ in new_history)
                     if not already_added:
                         new_history.append((old_topdown_poly, last_seen))
 
@@ -149,9 +130,19 @@ class YoloLaneDetector:
             occupied_area = min(occupied_area, total_lane_area)
             free_area = total_lane_area - occupied_area
 
-            avg_car_area = total_lane_area * self.avg_car_area_ratio
-            sector_capacity = int(round(1.0 / self.avg_car_area_ratio))
-            sector_free_cars = int(free_area // avg_car_area)
+            # 3.5. Прямий підрахунок за кількістю виявлених об'єктів та площею
+            sector_capacity = 4  # Загальна ємність цієї ділянки
+            
+            # Обчислюємо частку вільної площі
+            free_ratio = free_area / total_lane_area
+
+            # Динамічний поріг: якщо знайдено 4 авто АБО вільна площа менша за 25%
+            num_detected_cars = len(self.active_cars_history[idx])
+            
+            if num_detected_cars >= sector_capacity or free_ratio < 0.25:
+                sector_free_cars = 0
+            else:
+                sector_free_cars = max(0, sector_capacity - num_detected_cars)
 
             total_capacity += sector_capacity
             total_free_cars += sector_free_cars

@@ -32,10 +32,15 @@ def main():
         if not ret:
             continue
 
-        # Pipeline: Inference -> UI Render
+        # 1. Для аналітичного двигуна передаємо ТІЛЬКИ повністю сформовані зони (4 точки)
+        valid_spots = [spot for spot in zone_manager.spots if len(spot) == 4]
+
+        # 2. Детекція запускається тільки для валідних зон
         sector_stats, total_free, total_capacity = detector.analyze_frame(
-            frame, zone_manager.spots
+            frame, valid_spots
         )
+
+        # 3. Для UI рендеру передаємо УСІ spots, щоб бачити процеси малювання (червоні точки/лінії)
         display_frame = zone_manager.render_ui(
             frame, sector_stats, total_free, total_capacity
         )
@@ -45,6 +50,10 @@ def main():
         key = cv2.waitKey(1) & 0xFF
         if key == ord("c"):
             zone_manager.clear_all_spots()
+            detector.active_cars_history.clear()
+            detector.cached_stats = []
+            detector.cached_total_free = 0
+            detector.cached_total_capacity = 0
         elif key == ord("q"):
             break
 
