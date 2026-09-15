@@ -26,14 +26,18 @@ class YoloLaneDetector:
         self.cached_stats = []
         self.cached_total_free = 0
         self.cached_total_capacity = 0
+        self._warped_debug_saved = False
 
     def _get_birds_eye_polygon(self, spot_pts, target_width=800, target_height=200):
         src_pts = np.array(spot_pts, dtype=np.float32)
-        dst_pts = np.array(
-            [[0, 0], [target_width, 0], [target_width, target_height], [0, target_height]],
-            dtype=np.float32,
-        )
+        dst_pts = np.array([
+            [0, target_height],
+            [target_width, target_height],
+            [target_width, 0],
+            [0, 0],
+        ], dtype=np.float32)
         matrix = cv2.getPerspectiveTransform(src_pts, dst_pts)
+
         return matrix, target_width, target_height
 
     def _transform_bbox_to_topdown(
@@ -81,6 +85,16 @@ class YoloLaneDetector:
             )
 
         self.last_analysis_time = current_time
+
+        if not self._warped_debug_saved and spots:
+            first_spot = spots[0]
+            matrix, target_w, target_h = self._get_birds_eye_polygon(
+                first_spot, 800, 200
+            )
+            warped_frame = cv2.warpPerspective(frame, matrix, (target_w, target_h))
+            cv2.imwrite("test/warped_view.png", warped_frame)
+            self._warped_debug_saved = True
+            print("Saved warped_view.png for the first analysis pass.")
 
         results_iter = self.model(frame, classes=[2, 5, 7], verbose=False)
         result = next(iter(results_iter))

@@ -24,7 +24,7 @@ def main():
     # Тимчасово вимикаємо строгу перевірку SSL-сертифікатів для torch.hub
     ssl._create_default_https_context = ssl._create_unverified_context
     
-    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;5000000"
 
     # Instantiate decoupled components
     zone_manager = ZoneManager(config_path=CONFIG_PATH)
@@ -56,11 +56,26 @@ def main():
 
     print("Controls: 'y'=YOLO  'd'=DINOv2  'e'=calibrate DINOv2 empty baseline  'c'=clear zones  'q'=quit")
 
+    consecutive_failures = 0
     while True:
         ret, frame = cap.read()
         if not ret:
+            consecutive_failures += 1
+            if consecutive_failures >= 3:
+                print("Stream disconnected or timed out. Attempting to reconnect...")
+                cap.release()
+                cv2.waitKey(2000)  # Wait 2 seconds before retrying
+                cap = cv2.VideoCapture(RTSP_URL, cv2.CAP_FFMPEG)
+                if not cap.isOpened():
+                    print("Reconnection failed. Retrying in next iterations...")
+                else:
+                    print("Reconnected to stream successfully.")
+                    consecutive_failures = 0
+            else:
+                cv2.waitKey(10)
             continue
 
+        consecutive_failures = 0
         detector = detectors[current_mode]
 
         # 1. Only fully formed zones (4 points) go to the analytics engine
