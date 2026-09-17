@@ -11,3 +11,4 @@ test/*
 supabase/functions/.DS_Store
 *.DS_Store
 analyzator/config/parking_spots.json
+analyzator/test/warped_view.png

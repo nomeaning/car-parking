@@ -258,16 +258,12 @@ def main():
 
         cv2.imshow(WINDOW_NAME, display_frame)
 
-        # 4. Report to Supabase, throttled to REPORT_INTERVAL_SECONDS regardless
-        #    of actual frame rate. Skip while no zones are calibrated yet
-        #    (total_capacity == 0), so calibration doesn't spam bogus reports.
-        now = time.time()
-        if total_capacity > 0 and now - last_report_check >= REPORT_INTERVAL_SECONDS:
-            last_report_check = now
+        # 4. Report to Supabase only when the number of available spaces changes.
+        #    Skip while no zones are calibrated yet (total_capacity == 0).
+        if total_capacity > 0:
             should_send = (
-                last_free_spaces is None
-                or total_free > 0
-                or (total_free == 0 and last_free_spaces > 0)
+                last_free_spaces is None 
+                or total_free != last_free_spaces
             )
             if should_send:
                 # Optimize image size: resize to max width of 1280px and compress to 75% quality
