@@ -7,3 +7,7 @@ detectors/__pycache__
 config/parking_spots.json
 .idea
 test/*
+*.pyc
+supabase/functions/.DS_Store
+*.DS_Store
+analyzator/config/parking_spots.json
