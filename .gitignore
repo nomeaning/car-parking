@@ -6,3 +6,4 @@ yolov8x.pt
 detectors/__pycache__
 config/parking_spots.json
 .idea
+test/*
