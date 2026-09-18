@@ -1,11 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // Initialize Supabase using your project targets
+  // 1. Initialize Firebase
+  await Firebase.initializeApp();
+
+  // 2. Initialize Supabase using your project targets
   await Supabase.initialize(
     url: 'https://tlsvizqmjdasvnwztlum.supabase.co',
     anonKey: 'sb_publishable_vj7kCLqt89pA8_N9s9q9Ng_BMzth30d',
@@ -48,6 +54,7 @@ class _ParkingMonitorDashboardState extends State<ParkingMonitorDashboard> {
   bool _isLoading = true;
   RealtimeChannel? _realtimeSubscription;
   String? _timeBasis;
+  final _audioPlayer = AudioPlayer();
 
   @override
   void initState() {
@@ -61,6 +68,7 @@ class _ParkingMonitorDashboardState extends State<ParkingMonitorDashboard> {
     if (_realtimeSubscription != null) {
       _supabase.removeChannel(_realtimeSubscription!);
     }
+    _audioPlayer.dispose();
     super.dispose();
   }
 
@@ -180,6 +188,9 @@ class _ParkingMonitorDashboardState extends State<ParkingMonitorDashboard> {
   }
 
   void _triggerLocalNotification(dynamic spaces) {
+    // Play an audible alert sound
+    _audioPlayer.play(UrlSource('https://assets.mixkit.co/active_storage/sfx/2358/2358-preview.mp3'));
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Row(
@@ -201,22 +212,70 @@ class _ParkingMonitorDashboardState extends State<ParkingMonitorDashboard> {
     );
   }
 
-  void _toggleNotificationSubscription() {
-    setState(() {
-      _isSubscribed = !_isSubscribed;
-    });
+  Future<void> _toggleNotificationSubscription() async {
+    final newState = !_isSubscribed;
+    final messaging = FirebaseMessaging.instance;
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          _isSubscribed
-              ? 'Підписку оформлено! Ви отримаєте сповіщення, щойно звільниться паркувальне місце.'
-              : 'Скасовано підписку на сповіщення.',
-        ),
-        duration: const Duration(seconds: 3),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+    try {
+      if (newState) {
+        // 1. Request system notification permissions
+        NotificationSettings settings = await messaging.requestPermission(
+          alert: true,
+          badge: true,
+          sound: true,
+        );
+
+        if (settings.authorizationStatus == AuthorizationStatus.denied) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Будь ласка, дозвольте сповіщення в налаштуваннях.')),
+            );
+          }
+          return;
+        }
+
+        // 2. Fetch the real unique device token from Firebase
+        String? token = await messaging.getToken();
+        if (token == null) throw Exception("Failed to get FCM token");
+
+        // 3. Register real token in Supabase
+        await _supabase.from('parking_subscribers').upsert(
+          {'fcm_token': token},
+          onConflict: 'fcm_token',
+        );
+      } else {
+        // Remove current device token to stop notifications
+        String? token = await messaging.getToken();
+        if (token != null) {
+          await _supabase.from('parking_subscribers').delete().eq('fcm_token', token);
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _isSubscribed = newState;
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              _isSubscribed
+                  ? 'Підписку оформлено! Ви отримаєте сповіщення, щойно звільниться паркувальне місце.'
+                  : 'Скасовано підписку на сповіщення.',
+            ),
+            duration: const Duration(seconds: 3),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Subscription error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Помилка оновлення підписки. Спробуйте пізніше.')),
+        );
+      }
+    }
   }
 
   String _formatElapsedTime(String? isoString) {

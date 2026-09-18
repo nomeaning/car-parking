@@ -65,9 +65,9 @@ class DeviceSession:
             claims = json.loads(base64.urlsafe_b64decode(padded))
             role = claims.get("role")
             log.info("Signed in. Token role claim = %r", role)
-            if role != "device":
+            if role not in ["device", "authenticated"]:
                 log.warning(
-                    "Expected role claim 'device' but got %r — check the Auth Hook.",
+                    "Expected role claim 'device' or 'authenticated' but got %r.",
                     role,
                 )
         except Exception as e:

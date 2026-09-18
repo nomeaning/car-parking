@@ -12,3 +12,6 @@ supabase/functions/.DS_Store
 *.DS_Store
 analyzator/config/parking_spots.json
 analyzator/test/warped_view.png
+analyzator/CarParking.spec
+mobile_app/android/.kotlin/*
+*Secrets/
