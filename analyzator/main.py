@@ -4,14 +4,19 @@ import ssl
 import time
 import queue
 import threading
+import logging
 from datetime import datetime, timezone
 
 from report_sender import ReportSender
 from report_worker import report_worker
+from frame_source import FrameSource
 from detectors.yolo_detector import YoloLaneDetector
 from detectors.dinov2_detector import DinoV2LaneDetector
 from ZoneManager import ZoneManager
 from device_session import DeviceSession
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("main")
 
 # NOTE: credentials are hardcoded in the URL below — fine for local testing,
 # but move this to an env var before this code goes anywhere public/shared.
@@ -21,6 +26,8 @@ RTSP_URL = os.environ.get(
 )
 CONFIG_PATH = "config/parking_spots.json"
 WINDOW_NAME = "Smart Parking Monitor"
+INPUT_MODE = os.environ.get("INPUT_MODE", "video").lower()
+IMAGE_DIR = os.environ.get("IMAGE_DIR", "images")
 
 
 def main():
@@ -63,27 +70,34 @@ def main():
     }
     current_mode = "yolo"
 
-    cap = cv2.VideoCapture(RTSP_URL, cv2.CAP_FFMPEG)
-    if not cap.isOpened():
-        print("Error: Could not connect to stream.")
+    frame_source = FrameSource(RTSP_URL, IMAGE_DIR)
+    try:
+        frame_source.start(INPUT_MODE)
+    except (FileNotFoundError, ValueError) as error:
+        print(f"Input setup failed: {error}")
         return
 
     cv2.namedWindow(WINDOW_NAME)
     cv2.setMouseCallback(WINDOW_NAME, zone_manager.mouse_callback)
 
-    print("Controls: 'y'=YOLO  'd'=DINOv2  'e'=calibrate DINOv2 empty baseline  'c'=clear zones  'q'=quit")
+    print(
+        "Controls: 'y'=YOLO  'd'=DINOv2  'e'=calibrate  "
+        "'i'=test image  'v'=video  '['/']'=previous/next image  "
+        "'c'=clear zones  'q'=quit"
+    )
 
     consecutive_failures = 0
     while True:
-        ret, frame = cap.read()
+        ret, frame = frame_source.read()
         if not ret:
+            if frame_source.mode == "image":
+                print(f"Could not read test image: {frame_source.image_name}")
+                break
             consecutive_failures += 1
             if consecutive_failures >= 3:
                 print("Stream disconnected or timed out. Attempting to reconnect...")
-                cap.release()
                 cv2.waitKey(2000)  # Wait 2 seconds before retrying
-                cap = cv2.VideoCapture(RTSP_URL, cv2.CAP_FFMPEG)
-                if not cap.isOpened():
+                if not frame_source.reconnect_video():
                     print("Reconnection failed. Retrying in next iterations...")
                 else:
                     print("Reconnected to stream successfully.")
@@ -112,6 +126,20 @@ def main():
             display_frame,
             f"ENGINE: {current_mode.upper()}",
             (30, display_frame.shape[0] - 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 255),
+            2,
+        )
+        source_label = (
+            f"IMAGE: {frame_source.image_name}"
+            if frame_source.mode == "image"
+            else "SOURCE: VIDEO"
+        )
+        cv2.putText(
+            display_frame,
+            source_label,
+            (30, display_frame.shape[0] - 50),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (0, 255, 255),
@@ -174,10 +202,29 @@ def main():
                 detectors["dinov2"].calibrate(frame, valid_spots)
             else:
                 print("Calibration only applies to DINOv2 mode. Press 'd' first.")
+        elif key == ord("i"):
+            try:
+                frame_source.switch_to_image()
+                for d in detectors.values():
+                    d.reset_state()
+            except FileNotFoundError as error:
+                print(f"Input setup failed: {error}")
+        elif key == ord("v"):
+            frame_source.switch_to_video()
+            for d in detectors.values():
+                d.reset_state()
+        elif key == ord("]") and frame_source.mode == "image":
+            frame_source.next_image(1)
+            for d in detectors.values():
+                d.reset_state()
+        elif key == ord("[") and frame_source.mode == "image":
+            frame_source.next_image(-1)
+            for d in detectors.values():
+                d.reset_state()
         elif key == ord("q"):
             break
 
-    cap.release()
+    frame_source.close()
     cv2.destroyAllWindows()
 
 
