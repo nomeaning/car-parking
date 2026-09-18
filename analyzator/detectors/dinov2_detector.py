@@ -224,3 +224,12 @@ class DinoV2LaneDetector:
             state["stable"] = occupied_now
 
         return state["stable"]
+
+    def reset_state(self) -> None:
+        self.active_cars_history.clear()
+        self.reference_patch_embeddings.clear()
+        self.zone_patch_cells.clear()
+        self.cached_stats = []
+        self.cached_total_free = 0
+        self.cached_total_capacity = 0
+        self._last_infer_time = 0.0

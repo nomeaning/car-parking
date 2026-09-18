@@ -242,3 +242,10 @@ class YoloLaneDetector:
         self.cached_event_time = event_timestamp
 
         return sector_stats, total_free_cars, total_capacity, event_timestamp
+
+    def reset_state(self) -> None:
+        self.active_cars_history.clear()
+        self.cached_stats = []
+        self.cached_total_free = 0
+        self.cached_total_capacity = 0
+        self.cached_event_time = time.time()
