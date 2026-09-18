@@ -137,7 +137,7 @@ class DinoV2LaneDetector:
     def analyze_frame(self, frame: np.ndarray, valid_spots: list):
         now = time.time()
         if valid_spots and (now - self._last_infer_time) < (1.0 / self.fps_limit):
-            return self.cached_stats, self.cached_total_free, self.cached_total_capacity
+            return self.cached_stats, self.cached_total_free, self.cached_total_capacity, self._last_infer_time
         self._last_infer_time = now
 
         sector_stats = []
@@ -187,7 +187,7 @@ class DinoV2LaneDetector:
         self.cached_stats = sector_stats
         self.cached_total_free = total_free
         self.cached_total_capacity = total_capacity
-        return sector_stats, total_free, total_capacity
+        return sector_stats, total_free, total_capacity, now
 
     def _patches_to_bbox(self, cells, mask, frame_w, frame_h):
         """Bounding box (in original frame pixels) of the patches flagged

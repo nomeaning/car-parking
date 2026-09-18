@@ -181,6 +181,8 @@ def main():
     threading.Thread(target=report_worker, args=(session, report_queue), daemon=True).start()
     last_free_spaces = None
     last_report_check = 0.0
+    state_change_time = time.time()
+    app_start_time = time.time()
 
     # Instantiate decoupled components
     zone_manager = ZoneManager(config_path=CONFIG_PATH)
@@ -233,12 +235,13 @@ def main():
 
         consecutive_failures = 0
         detector = detectors[current_mode]
+        now = time.time()
 
         # 1. Only fully formed zones (4 points) go to the analytics engine
         valid_spots = [spot for spot in zone_manager.spots if len(spot) == 4]
 
         # 2. Run detection with the currently active engine
-        sector_stats, total_free, total_capacity = detector.analyze_frame(
+        sector_stats, total_free, total_capacity, event_timestamp = detector.analyze_frame(
             frame, valid_spots
         )
 
@@ -259,12 +262,21 @@ def main():
         cv2.imshow(WINDOW_NAME, display_frame)
 
         # 4. Report to Supabase only when the number of available spaces changes.
-        #    Skip while no zones are calibrated yet (total_capacity == 0).
+        #    Skip during initial warmup (12s) to allow detection stabilization.
         if total_capacity > 0:
-            should_send = (
-                last_free_spaces is None 
-                or total_free != last_free_spaces
-            )
+            if now - app_start_time < 12.0:
+                # Still in warmup, skip reporting but update UI
+                if int(now) % 3 == 0: # Print every 3 seconds
+                    print(f"[Detector] Warming up... stabilization in {int(12 - (now - app_start_time))}s")
+                should_send = False
+                state_change_time = now # Keep resetting until stable
+            else:
+                if total_free != last_free_spaces:
+                    state_change_time = now
+                    should_send = True
+                else:
+                    should_send = False
+
             if should_send:
                 # Optimize image size: resize to max width of 1280px and compress to 75% quality
                 h, w = display_frame.shape[:2]
@@ -277,7 +289,9 @@ def main():
 
                 ok, jpeg = cv2.imencode(".jpg", upload_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                 if ok:
-                    report_queue.put((datetime.now(timezone.utc), total_free, jpeg.tobytes()))
+                    # captured_at reflects exactly when the free space count changed
+                    captured_dt = datetime.fromtimestamp(state_change_time, tz=timezone.utc)
+                    report_queue.put((captured_dt, total_free, jpeg.tobytes()))
                 else:
                     log.error("Failed to encode frame for reporting")
             last_free_spaces = total_free

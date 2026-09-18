@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -14,7 +16,7 @@ void main() async {
   // 2. Initialize Supabase using your project targets
   await Supabase.initialize(
     url: 'https://tlsvizqmjdasvnwztlum.supabase.co',
-    anonKey: 'sb_publishable_vj7kCLqt89pA8_N9s9q9Ng_BMzth30d',
+    publishableKey: 'sb_publishable_vj7kCLqt89pA8_N9s9q9Ng_BMzth30d',
   );
 
   runApp(const SmartParkingApp());
@@ -53,18 +55,57 @@ class _ParkingMonitorDashboardState extends State<ParkingMonitorDashboard> {
   bool _isSubscribed = false;
   bool _isLoading = true;
   RealtimeChannel? _realtimeSubscription;
-  String? _timeBasis;
   final _audioPlayer = AudioPlayer();
+  Timer? _refreshTimer;
 
   @override
   void initState() {
     super.initState();
+    _loadSubscriptionState();
     _fetchInitialStatus();
     _initRealtimeStream();
+    
+    // Start a 1-second timer to keep the relative time labels "live"
+    _refreshTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  Future<void> _loadSubscriptionState() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _isSubscribed = prefs.getBool('is_subscribed') ?? false;
+      });
+    }
+
+    // Verify against Supabase in background
+    try {
+      final messaging = FirebaseMessaging.instance;
+      final token = await messaging.getToken();
+      if (token != null) {
+        final response = await _supabase
+            .from('parking_subscribers')
+            .select()
+            .eq('fcm_token', token)
+            .maybeSingle();
+        
+        final isActuallySubscribed = response != null;
+        if (isActuallySubscribed != _isSubscribed && mounted) {
+          setState(() {
+            _isSubscribed = isActuallySubscribed;
+          });
+          await prefs.setBool('is_subscribed', isActuallySubscribed);
+        }
+      }
+    } catch (e) {
+      debugPrint('Background subscription check failed: $e');
+    }
   }
 
   @override
   void dispose() {
+    _refreshTimer?.cancel();
     if (_realtimeSubscription != null) {
       _supabase.removeChannel(_realtimeSubscription!);
     }
@@ -78,87 +119,21 @@ class _ParkingMonitorDashboardState extends State<ParkingMonitorDashboard> {
           .from('parking_slots')
           .select()
           .order('captured_at', ascending: false)
+          .order('id', ascending: false)
           .limit(1)
           .maybeSingle();
 
       if (mounted) {
+        debugPrint('Fetched latest snapshot: ${response?['captured_at']} (ID: ${response?['id']})');
         setState(() {
           _latestSnapshot = response;
           _isLoading = false;
         });
-        _calculateTimeBasis(response);
       }
     } catch (e) {
       debugPrint('Error fetching status: $e');
       if (mounted) {
         setState(() => _isLoading = false);
-      }
-    }
-  }
-
-  Future<void> _calculateTimeBasis(Map<String, dynamic>? latest) async {
-    if (latest == null) return;
-    final int freeSpaces = latest['free_spaces'] ?? 0;
-    try {
-      if (freeSpaces > 0) {
-        final lastZeroRow = await _supabase
-            .from('parking_slots')
-            .select('captured_at')
-            .eq('free_spaces', 0)
-            .order('captured_at', ascending: false)
-            .limit(1)
-            .maybeSingle();
-            
-        if (lastZeroRow != null) {
-          final lastZeroTime = lastZeroRow['captured_at'] as String;
-          final firstFreeRow = await _supabase
-              .from('parking_slots')
-              .select('captured_at')
-              .gt('captured_at', lastZeroTime)
-              .gt('free_spaces', 0)
-              .order('captured_at', ascending: true)
-              .limit(1)
-              .maybeSingle();
-              
-          if (firstFreeRow != null) {
-            if (mounted) {
-              setState(() => _timeBasis = firstFreeRow['captured_at'] as String);
-              return;
-            }
-          }
-        }
-        
-        final oldestFreeRow = await _supabase
-            .from('parking_slots')
-            .select('captured_at')
-            .gt('free_spaces', 0)
-            .order('captured_at', ascending: true)
-            .limit(1)
-            .maybeSingle();
-        if (oldestFreeRow != null && mounted) {
-          setState(() => _timeBasis = oldestFreeRow['captured_at'] as String);
-        }
-      } else {
-        final lastFreeRow = await _supabase
-            .from('parking_slots')
-            .select('captured_at')
-            .gt('free_spaces', 0)
-            .order('captured_at', ascending: false)
-            .limit(1)
-            .maybeSingle();
-            
-        if (lastFreeRow != null && mounted) {
-          setState(() => _timeBasis = lastFreeRow['captured_at'] as String);
-        } else {
-          if (mounted) {
-            setState(() => _timeBasis = latest['captured_at'] as String);
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint('Error calculating time basis: $e');
-      if (mounted) {
-        setState(() => _timeBasis = latest['captured_at'] as String);
       }
     }
   }
@@ -175,7 +150,6 @@ class _ParkingMonitorDashboardState extends State<ParkingMonitorDashboard> {
               setState(() {
                 _latestSnapshot = payload.newRecord;
               });
-              _calculateTimeBasis(payload.newRecord);
               
               // If user is subscribed and a space just opened up, trigger a local push alert alert banner
               if (_isSubscribed && (payload.newRecord['free_spaces'] ?? 0) > 0) {
@@ -256,6 +230,12 @@ class _ParkingMonitorDashboardState extends State<ParkingMonitorDashboard> {
           _isSubscribed = newState;
         });
 
+        // Persist state locally for next app launch
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool('is_subscribed', newState);
+
+        if (!mounted) return;
+
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -279,14 +259,23 @@ class _ParkingMonitorDashboardState extends State<ParkingMonitorDashboard> {
   }
 
   String _formatElapsedTime(String? isoString) {
-    if (isoString == null) return 'Unknown';
+    if (isoString == null) return 'Невідомо';
     try {
-      final diff = DateTime.now().difference(DateTime.parse(isoString));
+      // Parse and ensure we treat it as UTC (Supabase stores timestamptz)
+      final DateTime capturedAt = DateTime.parse(isoString).toUtc();
+      final DateTime now = DateTime.now().toUtc();
+      
+      final diff = now.difference(capturedAt);
+      
+      // If server time is ahead of local time, show "just now"
+      if (diff.isNegative) return 'Тільки що';
+
       if (diff.inSeconds < 60) return '${diff.inSeconds}с тому';
       if (diff.inMinutes < 60) return '${diff.inMinutes}хв тому';
-      if (diff.inHours < 24) return '${diff.inHours}годин ${diff.inMinutes % 60}хв тому';
-      return '${diff.inDays} днів';
-    } catch (_) {
+      if (diff.inHours < 24) return '${diff.inHours}год ${diff.inMinutes % 60}хв тому';
+      return '${diff.inDays}дн тому';
+    } catch (e) {
+      debugPrint('Parsing error for $isoString: $e');
       return 'Невідомо';
     }
   }
@@ -403,7 +392,7 @@ class _ParkingMonitorDashboardState extends State<ParkingMonitorDashboard> {
                                     ),
                                     const SizedBox(width: 8),
                                     Text(
-                                      _formatElapsedTime(_timeBasis ?? capturedAt),
+                                      _formatElapsedTime(capturedAt),
                                       style: const TextStyle(
                                         fontSize: 22,
                                         fontWeight: FontWeight.bold,

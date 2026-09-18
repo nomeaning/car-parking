@@ -19,13 +19,23 @@ class YoloLaneDetector:
         self.fps_limit = fps_limit
         self.analysis_interval = 1.0 / fps_limit if fps_limit > 0 else 0
 
+        import torch
         self.model = YOLO(model_path)
+        
+        # Hardware acceleration for Apple Silicon
+        if torch.backends.mps.is_available():
+            self.model.to('mps')
+            print(f"[YOLO] Using MPS acceleration on Mac")
+        elif torch.cuda.is_available():
+            self.model.to('cuda')
+            print(f"[YOLO] Using CUDA acceleration")
         self.active_cars_history = {}
 
         self.last_analysis_time = 0.0
         self.cached_stats = []
         self.cached_total_free = 0
         self.cached_total_capacity = 0
+        self.cached_event_time = time.time()
         self._warped_debug_saved = False
 
     def _get_birds_eye_polygon(self, spot_pts, target_width=800, target_height=200):
@@ -73,7 +83,7 @@ class YoloLaneDetector:
 
     def analyze_frame(self, frame: np.ndarray, spots: list[list[list[int]]]):
         if not spots:
-            return [], 0, 0
+            return [], 0, 0, time.time()
 
         current_time = time.time()
 
@@ -82,6 +92,7 @@ class YoloLaneDetector:
                 self.cached_stats,
                 self.cached_total_free,
                 self.cached_total_capacity,
+                self.cached_event_time,
             )
 
         self.last_analysis_time = current_time
@@ -100,7 +111,7 @@ class YoloLaneDetector:
         result = next(iter(results_iter))
 
         detected_cars = []
-        for box in result.boxes.xyxy.numpy(): # type: ignore
+        for box in result.boxes.xyxy.cpu().numpy(): # type: ignore
             x1, y1, x2, y2 = map(int, box[:4])
             car_poly_2d = Polygon([(x1, y1), (x2, y1), (x2, y2), (x1, y2)])
             detected_cars.append((car_poly_2d, (x1, y1, x2, y2)))
@@ -116,42 +127,81 @@ class YoloLaneDetector:
             total_lane_area = topdown_lane_polygon.area
 
             if idx not in self.active_cars_history:
-                self.active_cars_history[idx] = []
+                self.active_cars_history[idx] = [] # List of {'poly': P, 'first_seen': T, 'last_seen': T}
 
-            new_history = []
+            current_frame_history = []
             active_boxes = []
 
+            # 1. Match current detections with history
             for car_poly_2d, bbox in detected_cars:
                 if Polygon(spot).intersects(car_poly_2d):
                     topdown_car_poly = self._transform_bbox_to_topdown(bbox, matrix, target_w, target_h)
-                    new_history.append((topdown_car_poly, current_time))
+                    
+                    matched = False
+                    for entry in self.active_cars_history[idx]:
+                        if topdown_car_poly.intersects(entry['poly']):
+                            # Update existing tracker
+                            entry['poly'] = topdown_car_poly
+                            entry['last_seen'] = current_time
+                            current_frame_history.append(entry)
+                            matched = True
+                            break
+                    
+                    if not matched:
+                        # Create new tracker for new potential car
+                        new_entry = {
+                            'poly': topdown_car_poly,
+                            'first_seen': current_time,
+                            'last_seen': current_time
+                        }
+                        current_frame_history.append(new_entry)
+                    
                     active_boxes.append(bbox)
 
-            for old_topdown_poly, last_seen in self.active_cars_history[idx]:
-                if current_time - last_seen < self.hold_time_seconds:
-                    already_added = any(old_topdown_poly.intersects(new_car) for new_car, _ in new_history)
-                    if not already_added:
-                        new_history.append((old_topdown_poly, last_seen))
+            # 2. Cleanup and Persistence
+            # Keep trackers that were either seen this frame OR were seen very recently (flicker protection)
+            updated_history = []
+            
+            # Add all currently seen
+            updated_history.extend(current_frame_history)
+            
+            # Add recently missing (but only if they were confirmed parked previously)
+            # to prevent passing cars from staying in history
+            for old_entry in self.active_cars_history[idx]:
+                if old_entry not in current_frame_history:
+                    time_since_last_seen = current_time - old_entry['last_seen']
+                    time_present = old_entry['last_seen'] - old_entry['first_seen']
+                    
+                    # If it was parked (present >= 10s), allow it to stay in history for 10s (occlusion/noise)
+                    # If it was just passing (present < 10s), drop it immediately (1s buffer)
+                    if time_present >= self.hold_time_seconds:
+                        if time_since_last_seen < self.hold_time_seconds: 
+                            updated_history.append(old_entry)
+                    else:
+                        if time_since_last_seen < 1.0:
+                            updated_history.append(old_entry)
 
-            self.active_cars_history[idx] = new_history
+            self.active_cars_history[idx] = updated_history
+
+            # 3. Calculate metrics based only on STABLE detections (present > 10s)
+            confirmed_cars = [
+                e for e in updated_history 
+                if (current_time - e['first_seen']) >= self.hold_time_seconds
+            ]
 
             occupied_area = 0.0
-            for topdown_car_poly, _ in self.active_cars_history[idx]:
-                if topdown_lane_polygon.intersects(topdown_car_poly):
-                    intersection = topdown_lane_polygon.intersection(topdown_car_poly)
+            for entry in confirmed_cars:
+                if topdown_lane_polygon.intersects(entry['poly']):
+                    intersection = topdown_lane_polygon.intersection(entry['poly'])
                     occupied_area += intersection.area
 
             occupied_area = min(occupied_area, total_lane_area)
             free_area = total_lane_area - occupied_area
 
-            # 3.5. Прямий підрахунок за кількістю виявлених об'єктів та площею
-            sector_capacity = 4  # Загальна ємність цієї ділянки
-            
-            # Обчислюємо частку вільної площі
+            # 3.5. Counting
+            sector_capacity = 4 
             free_ratio = free_area / total_lane_area
-
-            # Динамічний поріг: якщо знайдено 4 авто АБО вільна площа менша за 25%
-            num_detected_cars = len(self.active_cars_history[idx])
+            num_detected_cars = len(confirmed_cars)
             
             if num_detected_cars >= sector_capacity or free_ratio < 0.25:
                 sector_free_cars = 0
@@ -169,8 +219,26 @@ class YoloLaneDetector:
                 }
             )
 
+        # 4. Determine Event Basis (the earliest timestamp among confirmed cars)
+        # If no cars confirmed, use current frame time as baseline
+        event_timestamp = current_time
+        all_confirmed_times = []
+        for zone_history in self.active_cars_history.values():
+            for entry in zone_history:
+                if (current_time - entry['first_seen']) >= self.hold_time_seconds:
+                    all_confirmed_times.append(entry['first_seen'])
+        
+        if all_confirmed_times:
+            # Baseline is the most recent car to arrive (or earliest, depending on logic)
+            # Usually we want the 'earliest' car to define the state if it's the first car
+            # But the user wants 'Time since last free spot'. 
+            # If total_free > 0, we want the first seen of the most recent free period start.
+            # This is hard to calculate exactly here, so we pick the min (oldest car).
+            event_timestamp = min(all_confirmed_times)
+
         self.cached_stats = sector_stats
         self.cached_total_free = total_free_cars
         self.cached_total_capacity = total_capacity
+        self.cached_event_time = event_timestamp
 
-        return sector_stats, total_free_cars, total_capacity
+        return sector_stats, total_free_cars, total_capacity, event_timestamp
